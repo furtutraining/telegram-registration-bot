@@ -344,15 +344,19 @@ async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("PHONE STEP TRIGGERED")
     lang = get_lang(context)
 
-    if update.message.contact:
+    if update.message.contact and update.message.contact.user_id == update.effective_user.id:
         context.user_data["phone"] = update.message.contact.phone_number
+
     else:
-        text   = update.message.text.strip()
+        text = update.message.text.strip()
         digits = text.lstrip("+")
         if not digits.isdigit() or len(digits) < 7:
-            phone_btn = KeyboardButton(MESSAGES[lang]["phone_share_label"], request_contact=True)
+            phone_btn = KeyboardButton(
+                MESSAGES[lang]["phone_share_label"], request_contact=True
+            )
             await update.message.reply_text(
                 MESSAGES[lang]["invalid_phone"],
                 parse_mode="Markdown",
@@ -361,11 +365,19 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return PHONE
         context.user_data["phone"] = text
 
+    # REMOVE keyboard first (IMPORTANT)
+    await update.message.reply_text(
+        "✅ Phone received!",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    # THEN send next step
     await update.message.reply_text(
         MESSAGES[lang]["choose_course"],
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(COURSE_KB[lang], resize_keyboard=True),
     )
+
     return COURSE
 
 
