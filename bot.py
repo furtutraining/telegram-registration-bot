@@ -40,7 +40,7 @@ from telegram.ext import (
 # ═══════════════════════════════════════════════════════════════
 #  CONFIG  — only edit these values
 # ═══════════════════════════════════════════════════════════════
-TOKEN      = 
+TOKEN      = os.getenv("BOT_TOKEN")
 CHANNEL_ID = -1003518003389   # Set to None to disable channel posting
 ADMIN_IDS  = set()            # e.g. {123456789} — leave empty to allow all
 
