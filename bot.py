@@ -323,36 +323,17 @@ async def language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return NAME
 
 
-async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang      = get_lang(context)
-    name_text = update.message.text.strip()
-
-    if len(name_text) < 2:
-        await update.message.reply_text(
-            MESSAGES[lang]["invalid_name"], parse_mode="Markdown"
-        )
-        return NAME
-
-    context.user_data["name"] = name_text
-    phone_btn = KeyboardButton(MESSAGES[lang]["phone_share_label"], request_contact=True)
-    await update.message.reply_text(
-        MESSAGES[lang]["ask_phone"],
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup([[phone_btn]], resize_keyboard=True),
-    )
-    return PHONE
-
-
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("PHONE STEP TRIGGERED")
     lang = get_lang(context)
 
-    if update.message.contact and update.message.contact.user_id == update.effective_user.id:
+    # ✅ Accept ANY contact (fixes your issue)
+    if update.message.contact:
         context.user_data["phone"] = update.message.contact.phone_number
 
     else:
         text = update.message.text.strip()
-        digits = text.lstrip("+")
+        digits = text.replace("+", "")
+
         if not digits.isdigit() or len(digits) < 7:
             phone_btn = KeyboardButton(
                 MESSAGES[lang]["phone_share_label"], request_contact=True
@@ -363,15 +344,16 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=ReplyKeyboardMarkup([[phone_btn]], resize_keyboard=True),
             )
             return PHONE
+
         context.user_data["phone"] = text
 
-    # REMOVE keyboard first (IMPORTANT)
+    # ✅ Remove keyboard FIRST
     await update.message.reply_text(
         "✅ Phone received!",
         reply_markup=ReplyKeyboardRemove()
     )
 
-    # THEN send next step
+    # ✅ Force next step cleanly
     await update.message.reply_text(
         MESSAGES[lang]["choose_course"],
         parse_mode="Markdown",
@@ -552,8 +534,6 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  MAIN
 # ═══════════════════════════════════════════════════════════════
 def main():
-    # PicklePersistence saves conversation state to disk.
-    # If the server crashes and restarts, each user resumes from where they left off.
     persistence = PicklePersistence(filepath="bot_persistence.pkl")
 
     app = (
@@ -563,20 +543,20 @@ def main():
         .build()
     )
 
-conv = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
-    allow_reentry=True,  # required when persistent=True
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        allow_reentry=True,
         states={
-            LANG:       [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
-            NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
-            PHONE:      [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
-            COURSE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
+            LANG: [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+            PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
+            COURSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
             CLASS_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, class_type)],
-            TIME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, time_step)],
+            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time_step)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CommandHandler("start",  start),
+            CommandHandler("start", start),
         ],
     )
 
