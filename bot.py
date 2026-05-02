@@ -563,11 +563,9 @@ def main():
         .build()
     )
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        allow_reentry=True,
-        persistent=True,           # survives restarts
-        name="registration_conv",  # required when persistent=True
+conv = ConversationHandler(
+    entry_points=[CommandHandler("start", start)],
+    allow_reentry=True,  # required when persistent=True
         states={
             LANG:       [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
             NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
