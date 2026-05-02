@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-bot.py - Telegram registration bot
+bot.py — Furtu Training Registration Bot
+==========================================
 Features:
- - multilingual (English, Amharic, Oromo) registration flow
- - /start restarts conversation anytime
- - rejects typed answers not in buttons (except name)
- - processes updates that arrived while bot was offline (drop_pending_updates=False)
- - safe channel posting (exceptions handled; won't crash on BadRequest)
- - helper /myid to show current chat id
+  • Trilingual welcome message: English + አማርኛ + Afaan Oromoo all shown at once
+  • 5-step guided flow — no location question asked (shown fixed at end)
+  • Course price displayed: 5,000 ETB
+  • Fixed office location shown in final summary (both Amharic & Oromo)
+  • Telegram username captured automatically from user profile
+  • PicklePersistence — conversation state survives server restarts
+  • Posts summary to Telegram channel on each registration
+  • Social footer: @furtutraining (Telegram + TikTok)
+  • /start restarts conversation at any point
+  • /cancel aborts cleanly
+  • /myid and /admin utilities
+  • Crash-safe channel posting
 """
 
 import logging
@@ -27,429 +34,549 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     filters,
+    PicklePersistence,
 )
 
-# ================== CONFIG ==================
-# Replace with your channel/group id (example: -1001234567890). Leave as None or placeholder if you don't want to post to a channel.
-CHANNEL_ID = -1003518003389  # e.g. -1001234567890
+# ═══════════════════════════════════════════════════════════════
+#  CONFIG  — only edit these values
+# ═══════════════════════════════════════════════════════════════
+TOKEN      = 
+CHANNEL_ID = -1003518003389   # Set to None to disable channel posting
+ADMIN_IDS  = set()            # e.g. {123456789} — leave empty to allow all
 
-# Conversation states
-LANG, NAME, PHONE, COURSE, CLASS_TYPE, TIME, LOCATION = range(7)
+COURSE_PRICE = "5,000 ETB"
 
-# ================ LOGGING ====================
+TELEGRAM_CHANNEL = "https://t.me/furtutraining"
+TIKTOK_CHANNEL   = "https://www.tiktok.com/@furtutraining"
+
+FIXED_LOCATION_LINE = (
+    "Roobee, Gamoo Awash Darbii Lammaffaa\n"
+    "ሮቤ አዋሽ ህንጻ ሁለተኛ ፎቅ"
+)
+
+SOCIAL_FOOTER = (
+    "\n\n"
+    "━━━━━━━━━━━━━━━━━━━\n"
+    "🔔 *Follow us & stay updated:*\n"
+        f"📲[Telegram Channel]({TELEGRAM_CHANNEL})\n"
+        f"🎵[TikTok]({TIKTOK_CHANNEL})\n"
+    "━━━━━━━━━━━━━━━━━━━"
+)
+
+# ═══════════════════════════════════════════════════════════════
+#  CONVERSATION STATES
+# ═══════════════════════════════════════════════════════════════
+LANG, NAME, PHONE, COURSE, CLASS_TYPE, TIME = range(6)
+
+# ═══════════════════════════════════════════════════════════════
+#  LOGGING
+# ═══════════════════════════════════════════════════════════════
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s | %(levelname)-8s | %(name)s — %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ================ DATABASE ===================
-conn = sqlite3.connect("registrations.db", check_same_thread=False)
+# ═══════════════════════════════════════════════════════════════
+#  DATABASE
+# ═══════════════════════════════════════════════════════════════
+conn   = sqlite3.connect("registrations.db", check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute(
-    """
-CREATE TABLE IF NOT EXISTS registrations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    language TEXT,
-    name TEXT,
-    phone TEXT,
-    course TEXT,
-    class_type TEXT,
-    time TEXT,
-    location TEXT,
-    timestamp TEXT
-)
-"""
-)
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS registrations (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER,
+        username   TEXT,
+        language   TEXT,
+        name       TEXT,
+        phone      TEXT,
+        course     TEXT,
+        class_type TEXT,
+        time       TEXT,
+        timestamp  TEXT
+    )
+""")
 conn.commit()
 
-# ============ LOCALIZED STRINGS ==============
+# ═══════════════════════════════════════════════════════════════
+#  LANGUAGE MAP
+# ═══════════════════════════════════════════════════════════════
+LANGUAGE_MAP = {
+    "🇬🇧 English":   "en",
+    "🇪🇹 አማርኛ":     "am",
+    "Afaan Oromoo": "om",
+}
+
+LANG_KB = [[btn] for btn in LANGUAGE_MAP.keys()]
+
+# ═══════════════════════════════════════════════════════════════
+#  LOCALIZED STRINGS
+# ═══════════════════════════════════════════════════════════════
 ONLY_BUTTON_MSG = {
-    "en": "❌ Please choose only from buttons 👇",
+    "en": "❌ Please choose only from the buttons below 👇",
     "am": "❌ እባክዎ ከታች ካሉት ብቻ ይምረጡ 👇",
     "om": "❌ Maaloo filannoo kagaditti argaman qofa fayyadami 👇",
 }
 
-language_map = {
-    "English": "en",
-    "አማርኛ": "am",
-    "Afaan Oromoo": "om",
-}
+# Welcome shown before language selection — all 3 languages at once
+WELCOME_MSG = (
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🎓 *FURTU TRAINING CENTER*\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-messages = {
+    "🇬🇧 *Welcome!* This bot guides you through\n"
+    "registering for one of our professional\n"
+    "technical training courses.\n\n"
+
+    "🇪🇹 *እንኳን ደህና መጡ!* ይህ ቦት የሙያ\n"
+    " ሥልጠናዎቻችንን ለመመዝገብ\n"
+    "ይረዳዎታል።\n\n"
+
+    "🟢 *Baga Nagaan Dhuftan!* Booti kun\n"
+    "leenjii teeknikaa keenya galmeessuuf\n"
+    "si ni gargaara.\n\n"
+
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🌐 Choose Language / ቋንቋ ይምረጡ / Afaan Filadhu:"
+)
+
+MESSAGES = {
     "en": {
-        "choose_language": "Choose Language:",
-        "invalid_language": "Please choose language using buttons 👇",
-        "ask_name": "What is your full name?",
-        "invalid_name": "Please enter a valid full name.",
-        "ask_phone": "Enter phone number or press share:",
-        "phone_share_label": "Share Phone Number",
-        "invalid_phone": "Please use share button or enter digits only.",
-        "choose_course": "Choose course:",
-        "choose_class": "Choose class type:",
-        "choose_time": "Choose preferred time:",
-        "choose_location": "Choose location:",
-        "registration_complete": "✅ Registration completed successfully!",
+        "invalid_language":  "Please choose a language using the buttons below 👇",
+        "ask_name":          "✏️ Please enter your *full name*:",
+        "invalid_name":      "⚠️ Name must be at least 2 characters. Please try again:",
+        "ask_phone":         "📱 Enter your phone number, or tap *Share My Phone Number* below:",
+        "phone_share_label": "📲 Share My Phone Number",
+        "invalid_phone":     "⚠️ Digits only please, or use the Share button below:",
+        "choose_course": (
+            "📚 *Select the course you want to register for:*\n\n"
+            f"💰 *Course Fee: {COURSE_PRICE}* per course*\n\n"
+            "⏰ *The course Will Take 45 days*\n\n"
+        ),
+        "choose_class":  "🏫 Choose your preferred *class schedule*:",
+        "choose_time":   "⏰ Choose your preferred *class time*:",
+        "done": (
+            "✅ *Registration Successful!*\n\n"
+            "Our team will contact you shortly to confirm your enrollment.\n"
+            "Thank you for choosing *Furtu Training Center!* 🎉"
+        ),
+        "cancelled": "🚫 Registration cancelled. Type /start to begin again.",
     },
     "am": {
-        "choose_language": "ቋንቋ ይምረጡ:",
-        "invalid_language": "እባክዎ ከታች ቋንቋ ይምረጡ 👇",
-        "ask_name": "ሙሉ ስምዎን ያስገቡ:",
-        "invalid_name": "እባክዎ ትክክለኛ ሙሉ ስም ያስገቡ።",
-        "ask_phone": "ስልክ ቁጥርዎን ያስገቡ ወይም ከታች 'ስልክ ቁጥር ላክ' የሚለውን ይጫኑ፡",
-        "phone_share_label": "ስልክ ቁጥር ላክ",
-        "invalid_phone": "እባክዎ እንዲታወቅ የስልክ ቁጥር ቁጥሮችን ብቻ ያስገቡ ወይም 'ስልክ ቁጥር ላክ' ይጠቀሙ።",
-        "choose_course": "ትምህርቱን ይምረጡ:",
-        "choose_class": "የክፍል ዓይነት ይምረጡ:",
-        "choose_time": "ጊዜ ይምረጡ:",
-        "choose_location": "ቦታ ይምረጡ:",
-        "registration_complete": "✅ ስራዎ ተከናወኗል!",
+        "invalid_language":  "እባክዎ ከታች ቋንቋ ይምረጡ 👇",
+        "ask_name":          "✏️ *ሙሉ ስምዎን* ያስገቡ:",
+        "invalid_name":      "⚠️ ስም ቢያንስ 2 ፊደሎች መያዝ አለበት። ዳግም ይሞክሩ:",
+        "ask_phone":         "📱 ስልክ ቁጥርዎን ያስገቡ ወይም ከታች *ስልክ ቁጥር ላክ* ይጫኑ:",
+        "phone_share_label": "📲 ስልክ ቁጥር ላክ",
+        "invalid_phone":     "⚠️ ቁጥሮችን ብቻ ያስገቡ ወይም 'ስልክ ቁጥር ላክ' ይጠቀሙ:",
+        "choose_course": (
+            "📚 *መመዝገብ የሚፈልጉትን ኮርስ ይምረጡ:*\n\n"
+            f"💰 *የ አንዱ የስልጠና ዋጋ: {COURSE_PRICE} ነው*\n\n"
+            "⏰*መደበኛ የቆይታ ጊዜ:45 ቀን"
+        ),
+        "choose_class":  "🏫 *የክፍል ዓይነት* ይምረጡ:",
+        "choose_time":   "⏰ *ጊዜ* ይምረጡ:",
+        "done": (
+            "✅ *ምዝገባው ተሳክቷል!*\n\n"
+            "ቡድናችን ምዝገባዎን ለማረጋገጥ በቅርቡ ያናግርዎታል።\n"
+            "*የፉርቱ ሥልጠና ማዕከልን* ስለመረጡ እናመሰግናለን! 🎉"
+        ),
+        "cancelled": "🚫 ምዝገባ ተሰርዟል። ለማስጀመር /start ይጻፉ።",
     },
     "om": {
-        "choose_language": "Afaan filadhu:",
-        "invalid_language": "Maaloo afaan kagadii argaman filadhu 👇",
-        "ask_name": "Maqaa guutuu kee galchi:",
-        "invalid_name": "Maaloo maqaa guutuu sirrii galchi.",
-        "ask_phone": "Lakkoofsa bilbilaa galchi yookaan 'Eergi' tuqi:",
-        "phone_share_label": "Lakkoofsa Eergii",
-        "invalid_phone": "Maaloo 'Share' tuqi yookaan lakkoofsa qofa galchi.",
-        "choose_course": "Leenjii filadhu:",
-        "choose_class": "Gosa kutaa filadhu:",
-        "choose_time": "Yeroo filadhu:",
-        "choose_location": "Bakka filadhu:",
-        "registration_complete": "✅ Galmeen milkaa'eera!",
+        "invalid_language":  "Maaloo afaan kagadii argaman filadhu 👇",
+        "ask_name":          "✏️ *Maqaa guutuu* kee galchi:",
+        "invalid_name":      "⚠️ Maqaan qubee 2 ol qabaachuu qaba. Deebi'ii yaali:",
+        "ask_phone":         "📱 Lakkoofsa bilbilaa galchi yookaan *Lakkoofsa Eergii* tuqi:",
+        "phone_share_label": "📲 Lakkoofsa Eergii",
+        "invalid_phone":     "⚠️ Lakkoofsa qofa galchi yookaan 'Eergii' tuqi:",
+        "choose_course": (
+            "📚 *Leenjii galma'uu barbaaddu filadhu:*\n\n"
+            f"💰 *Gatii Leenjii: {COURSE_PRICE}* leenjii tokkoof*\n\n"
+            "⏰ *Leenjiin Guyyaa 45niif Kennama*"
+        ),
+        "choose_class":  "🏫 *Gosa kutaa* filadhu:",
+        "choose_time":   "⏰ *Yeroo* filadhu:",
+        "done": (
+            "✅ *Galmeessi milkaa'eera!*\n\n"
+            "Gareen keenya galmee kee mirkaneessuuf si qunnamuu ni danda'a.\n"
+            "*Furtu Training Center* filattee galatomii! 🎉"
+        ),
+        "cancelled": "🚫 Galmeen haqame. Jalqabuuf /start barreessi.",
     },
 }
 
-# ================ COURSES ===================
-# Using the strings you provided earlier (kept as the user gave).
-course_options = {
+# ═══════════════════════════════════════════════════════════════
+#  OPTION KEYBOARDS
+# ═══════════════════════════════════════════════════════════════
+COURSE_KB = {
     "en": [
-        ["Mobile Maintenance"],
-        ["Advanced Mobile Software"],
-        ["Advanced Mobile Hardware"],
-        ["Laptop & Computer Maintenance"],
-        ["Basic Computer"],
-        ["Tv,Decoder & Geepas Maintenance"],
-        ["Video Editing"],
-        ["Web & App Development"],
-        ["Electrical Installation"],
-        ["Satellite Installation"],
-    ],
-    "om": [
-        ["suphaa mobaayilaa bu'uuraa"],
-        ["suphaa mobaayilaa softweraa Ol'aanaa"],
-        ["suphaa mobaayilaa hardweraa Ol'aanaa"],
-        ["suphaa laptopi fi koompiitaraa"],
-        ["bu'uuraa kompiitaraa"],
-        ["suphaa tivi,dikodari fi jipaasii"],
-        ["Video editing"],
-        ["Web Development"],
-        ["istalleshini elektrikaa"],
-        ["dishi sirressu"],
+        ["📱 Mobile Maintenance"],
+        ["💻 Advanced Mobile Software"],
+        ["🔧 Advanced Mobile Hardware"],
+        ["🖥️ Laptop & Computer Maintenance"],
+        ["📺 TV, Decoder & Geepas Maintenance"],
     ],
     "am": [
-        ["ሞባይል ጥገና"],
-        ["አድቫንስድ የሞባይል ሶፍትዌር ጥገና"],
-        ["አድቫንስድ የሞባይል ሃርድዌር ጥገና"],
-        ["ላፕቶፕ እና ኮምፒውተር ጥገና"],
-        ["መሰረታዊ ኮምፒውተር"],
-        ["የ ቲቪ፣ዲኮደር እና ጂፓስ ጥገና"],
-        ["የቪዲዮ ኢዲቲንግ"],
-        ["Web Development"],
-        ["መብራት ዝርጋታ"],
-        ["ዲሽ ማስተካከል"],
+        ["📱 ሞባይል ጥገና"],
+        ["💻 አድቫንስድ የሞባይል ሶፍትዌር ጥገና"],
+        ["🔧 አድቫንስድ የሞባይል ሃርድዌር ጥገና"],
+        ["🖥️ ላፕቶፕ እና ኮምፒውተር ጥገና"],
+        ["📺 የቲቪ፣ ዲኮደር እና ጂፓስ ጥገና"],
+    ],
+    "om": [
+        ["📱 Suphaa Mobaayilaa Bu'uuraa"],
+        ["💻 Suphaa Mobaayilaa Softweraa Ol'aanaa"],
+        ["🔧 Suphaa Mobaayilaa Hardweraa Ol'aanaa"],
+        ["🖥️ Suphaa Laptopi fi Koompiitaraa"],
+        ["📺 Suphaa Tivi, Dikodari fi Jipaasii"],
     ],
 }
 
-# ============== OTHER KEYBOARDS ==============
-class_kb_local = {
-    "en": [["Regular"], ["Weekend"], ["Online"]],
-    "am": [["ከ ሰኞ-አርብ"], ["ቅዳሜ እና እሁድ"], ["ኦንላይን ላይ"]],
-    "om": [["Regular"], ["Weekend"], ["Online"]],
+CLASS_KB = {
+    "en": [["📅 Regular (Mon–Fri)"], ["🗓️ Weekend"],            ["🌐 Online"]],
+    "am": [["📅 ከሰኞ እስከ አርብ"],      ["🗓️ ቅዳሜ እና እሁድ"],        ["🌐 ኦንላይን"]],
+    "om": [["📅 Wiixata–Jimaata"],   ["🗓️ Sanbata fi Dilbata"], ["🌐 Online"]],
 }
 
-time_kb_local = {
-    "en": [["Morning"], ["Afternoon"]],
-    "am": [["ጠዋት"], ["ከሰዓት በኋላ"]],
-    "om": [["Ganama"], ["Galgala"]],
+TIME_KB = {
+    "en": [["🌅 Morning (8 AM – 12 PM)"], ["🌇 Afternoon (1 PM – 5 PM)"]],
+    "am": [["🌅 ጠዋት (8:00 – 12:00)"],    ["🌇 ከሰዓት (1:00 – 5:00)"]],
+    "om": [["🌅 Ganama (8 – 12)"],        ["🌇 Waaree booda (1 – 5)"]],
 }
 
-location_kb_local = {
-    "en": [["Goba"], ["Robe"]],
-    "am": [["ጎባ"], ["ሮቤ"]],
-    "om": [["Goba"], ["Robe"]],
-}
-
-
-# ================ HELPERS ===================
-def flatten(kb):
-    """Flatten keyboard (list of rows -> list of items)."""
+# ═══════════════════════════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════════════════════════
+def flatten(kb: list) -> list:
     return [item for row in kb for item in row]
 
 
-def valid_choice(text, keyboard):
-    flat = flatten(keyboard)
-    return text in flat
+def valid_choice(text: str, keyboard: list) -> bool:
+    return text in flatten(keyboard)
 
 
-# ================ HANDLERS ==================
+def get_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return context.user_data.get("language", "en")
+
+
+def build_channel_summary(data: dict, timestamp: str) -> str:
+    uname = f"@{data['username']}" if data.get("username") else "—"
+    return (
+    
+        "📋  *NEW REGISTRATION — FURTU TRAINING*\n"
+        f"👤  *Name:* {data['name']}\n"
+        f"📞  *Phone:* {data['phone']}\n"
+        f"📚  *Course:* {data['course']}\n"
+        f"🏫  *Schedule:* {data['class_type']}\n"
+        f"⏰  *Time:* {data['time']}\n"
+        f"🔖  *Username:* {uname}\n"
+        f"🕐  *Registered:* {timestamp}\n"
+    )
+
+
+def build_user_summary(data: dict, timestamp: str) -> str:
+    uname = f"@{data['username']}" if data.get("username") else "—"
+    return (
+        "📋  *Registration Summary*\n"
+        f"👤  *Name:* {data['name']}\n"
+        f"📞  *Phone:* {data['phone']}\n"
+        f"📚  *Course:* {data['course']}\n"
+        f"🏫  *Schedule:* {data['class_type']}\n"
+        f"📍  *Location:*"
+        f"{FIXED_LOCATION_LINE}\n"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  HANDLERS
+# ═══════════════════════════════════════════════════════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command - always restarts the conversation"""
-    # clear any previous state
     context.user_data.clear()
-
-    lang_kb = [["English", "አማርኛ", "Afaan Oromoo"]]
-    # show english prompt by default so user sees language options
     await update.message.reply_text(
-        messages["en"]["choose_language"],
-        reply_markup=ReplyKeyboardMarkup(lang_kb, resize_keyboard=True),
+        WELCOME_MSG,
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(LANG_KB, resize_keyboard=True),
     )
     return LANG
 
 
 async def language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text not in language_map:
-        lang_kb = [["English", "አማርኛ", "Afaan Oromoo"]]
+    if text not in LANGUAGE_MAP:
         await update.message.reply_text(
-            messages["en"]["invalid_language"],
-            reply_markup=ReplyKeyboardMarkup(lang_kb, resize_keyboard=True),
+            MESSAGES["en"]["invalid_language"],
+            reply_markup=ReplyKeyboardMarkup(LANG_KB, resize_keyboard=True),
         )
         return LANG
 
-    lang_code = language_map[text]
-    context.user_data["language"] = lang_code
+    lang = LANGUAGE_MAP[text]
+    context.user_data["language"] = lang
+    # Capture Telegram username now
+    context.user_data["username"] = update.effective_user.username or ""
 
     await update.message.reply_text(
-        messages[lang_code]["ask_name"], reply_markup=ReplyKeyboardRemove()
+        MESSAGES[lang]["ask_name"],
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
     )
     return NAME
 
 
 async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang      = get_lang(context)
     name_text = update.message.text.strip()
-    lang = context.user_data.get("language", "en")
 
     if len(name_text) < 2:
-        await update.message.reply_text(messages[lang]["invalid_name"])
+        await update.message.reply_text(
+            MESSAGES[lang]["invalid_name"], parse_mode="Markdown"
+        )
         return NAME
 
     context.user_data["name"] = name_text
-
-    # ask phone with contact button
-    phone_button = KeyboardButton(messages[lang]["phone_share_label"], request_contact=True)
+    phone_btn = KeyboardButton(MESSAGES[lang]["phone_share_label"], request_contact=True)
     await update.message.reply_text(
-        messages[lang]["ask_phone"],
-        reply_markup=ReplyKeyboardMarkup([[phone_button]], resize_keyboard=True),
+        MESSAGES[lang]["ask_phone"],
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([[phone_btn]], resize_keyboard=True),
     )
     return PHONE
 
 
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("language", "en")
+    lang = get_lang(context)
 
     if update.message.contact:
         context.user_data["phone"] = update.message.contact.phone_number
     else:
-        text = update.message.text.strip()
-        if not text.isdigit():
-            phone_button = KeyboardButton(messages[lang]["phone_share_label"], request_contact=True)
+        text   = update.message.text.strip()
+        digits = text.lstrip("+")
+        if not digits.isdigit() or len(digits) < 7:
+            phone_btn = KeyboardButton(MESSAGES[lang]["phone_share_label"], request_contact=True)
             await update.message.reply_text(
-                messages[lang]["invalid_phone"],
-                reply_markup=ReplyKeyboardMarkup([[phone_button]], resize_keyboard=True),
+                MESSAGES[lang]["invalid_phone"],
+                parse_mode="Markdown",
+                reply_markup=ReplyKeyboardMarkup([[phone_btn]], resize_keyboard=True),
             )
             return PHONE
         context.user_data["phone"] = text
 
-    # show localized course keyboard
-    course_kb = course_options.get(lang, course_options["en"])
     await update.message.reply_text(
-        messages[lang]["choose_course"],
-        reply_markup=ReplyKeyboardMarkup(course_kb, resize_keyboard=True),
+        MESSAGES[lang]["choose_course"],
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(COURSE_KB[lang], resize_keyboard=True),
     )
     return COURSE
 
 
 async def course(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("language", "en")
-    course_kb = course_options.get(lang, course_options["en"])
+    lang      = get_lang(context)
+    course_kb = COURSE_KB[lang]
 
     if not valid_choice(update.message.text, course_kb):
         await update.message.reply_text(
-            ONLY_BUTTON_MSG.get(lang, ONLY_BUTTON_MSG["en"]),
+            ONLY_BUTTON_MSG[lang],
             reply_markup=ReplyKeyboardMarkup(course_kb, resize_keyboard=True),
         )
         return COURSE
 
     context.user_data["course"] = update.message.text
-
-    class_kb = class_kb_local.get(lang, class_kb_local["en"])
     await update.message.reply_text(
-        messages[lang]["choose_class"],
-        reply_markup=ReplyKeyboardMarkup(class_kb, resize_keyboard=True),
+        MESSAGES[lang]["choose_class"],
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(CLASS_KB[lang], resize_keyboard=True),
     )
     return CLASS_TYPE
 
 
 async def class_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("language", "en")
-    class_kb = class_kb_local.get(lang, class_kb_local["en"])
+    lang     = get_lang(context)
+    class_kb = CLASS_KB[lang]
 
     if not valid_choice(update.message.text, class_kb):
         await update.message.reply_text(
-            ONLY_BUTTON_MSG.get(lang, ONLY_BUTTON_MSG["en"]),
+            ONLY_BUTTON_MSG[lang],
             reply_markup=ReplyKeyboardMarkup(class_kb, resize_keyboard=True),
         )
         return CLASS_TYPE
 
     context.user_data["class_type"] = update.message.text
-
-    time_kb = time_kb_local.get(lang, time_kb_local["en"])
     await update.message.reply_text(
-        messages[lang]["choose_time"], reply_markup=ReplyKeyboardMarkup(time_kb, resize_keyboard=True)
+        MESSAGES[lang]["choose_time"],
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(TIME_KB[lang], resize_keyboard=True),
     )
     return TIME
 
 
-async def time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("language", "en")
-    time_kb = time_kb_local.get(lang, time_kb_local["en"])
+async def time_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang    = get_lang(context)
+    time_kb = TIME_KB[lang]
 
     if not valid_choice(update.message.text, time_kb):
         await update.message.reply_text(
-            ONLY_BUTTON_MSG.get(lang, ONLY_BUTTON_MSG["en"]),
+            ONLY_BUTTON_MSG[lang],
             reply_markup=ReplyKeyboardMarkup(time_kb, resize_keyboard=True),
         )
         return TIME
 
     context.user_data["time"] = update.message.text
-
-    location_kb = location_kb_local.get(lang, location_kb_local["en"])
-    await update.message.reply_text(
-        messages[lang]["choose_location"],
-        reply_markup=ReplyKeyboardMarkup(location_kb, resize_keyboard=True),
-    )
-    return LOCATION
-
-
-async def location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("language", "en")
-    location_kb = location_kb_local.get(lang, location_kb_local["en"])
-
-    if not valid_choice(update.message.text, location_kb):
-        await update.message.reply_text(
-            ONLY_BUTTON_MSG.get(lang, ONLY_BUTTON_MSG["en"]),
-            reply_markup=ReplyKeyboardMarkup(location_kb, resize_keyboard=True),
-        )
-        return LOCATION
-
-    context.user_data["location"] = update.message.text
-    data = context.user_data
+    data      = context.user_data
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Save to DB
+    # ── Save to DB ─────────────────────────────────────────────
     try:
         cursor.execute(
-            """
-        INSERT INTO registrations
-        (language, name, phone, course, class_type, time, location, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+            """INSERT INTO registrations
+               (user_id, username, language, name, phone, course, class_type, time, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
+                update.effective_user.id,
+                data.get("username", ""),
                 data.get("language", "en"),
                 data["name"],
                 data["phone"],
                 data["course"],
                 data["class_type"],
                 data["time"],
-                data["location"],
                 timestamp,
             ),
         )
         conn.commit()
-    except Exception as e:
-        logger.exception("DB insert failed: %s", e)
+        logger.info("Saved registration: user_id=%s username=%s",
+                    update.effective_user.id, data.get("username"))
+    except Exception as exc:
+        logger.exception("DB insert failed: %s", exc)
 
-    # Build summary
-    summary = (
-        f"📌 REGISTRATION SUMMARY\n\n"
-        f"👤 Name: {data['name']}\n"
-        f"📞 Phone: {data['phone']}\n"
-        f"📚 Course: {data['course']}\n"
-        f"🏫 Class: {data['class_type']}\n"
-        f"⏰ Time: {data['time']}\n"
-        f"📍 Location: {data['location']}\n"
-        f"🗓 Date: {timestamp}"
-    )
-
-    # Try sending to channel safely
+    # ── Post to channel ────────────────────────────────────────
     if CHANNEL_ID:
         try:
-            await context.bot.send_message(chat_id=CHANNEL_ID, text=summary)
-        except Exception as e:
-            # don't crash - log and continue
-            logger.warning("Failed to send to CHANNEL_ID (%s): %s", CHANNEL_ID, e)
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=build_channel_summary(data, timestamp),
+                parse_mode="Markdown",
+            )
+        except Exception as exc:
+            logger.warning("Channel post failed (%s): %s", CHANNEL_ID, exc)
 
-    # Reply to user (localized)
-    done_text = messages[lang].get("registration_complete", messages["en"]["registration_complete"])
-    await update.message.reply_text(summary + f"\n\n{done_text}", reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True))
-
+    # ── Reply to user ──────────────────────────────────────────
+    await update.message.reply_text(
+        build_user_summary(data, timestamp)
+        + f"\n\n{MESSAGES[lang]['done']}"
+        + SOCIAL_FOOTER,
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(
+            [[" /start "]], resize_keyboard=True
+        ),
+    )
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
     context.user_data.clear()
-    await update.message.reply_text("Registration cancelled.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        MESSAGES[lang]["cancelled"],
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return ConversationHandler.END
 
 
-# This handler will catch plain texts that are not matched by the ConversationHandler
-# (i.e. messages outside a running conversation or unexpected input).
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Try to respond in user's language if we have it stored; otherwise use English.
-    lang = context.user_data.get("language", "en")
-    # If the user is currently in a conversation state and types something unexpected,
-    # the conversation-specific handlers already manage that. This handler is for general texts.
-    await update.message.reply_text(ONLY_BUTTON_MSG.get(lang, ONLY_BUTTON_MSG["en"]))
-
-
-# Helper to show chat id - useful to get channel/group id for CHANNEL_ID setting.
+# ═══════════════════════════════════════════════════════════════
+#  UTILITY COMMANDS
+# ═══════════════════════════════════════════════════════════════
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    await update.message.reply_text(f"Chat id: {chat.id}")
-
-
-# ================ MAIN ======================
-import os
-
-def main():
-    TOKEN = os.getenv("BOT_TOKEN")
-    if not TOKEN:
-        raise ValueError("No BOT_TOKEN found in environment variables")
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        allow_reentry=True,
-        states={
-            LANG: [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
-            PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
-            COURSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
-            CLASS_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, class_type)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time)],
-            LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, location)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+    user = update.effective_user
+    await update.message.reply_text(
+        f"👤 *Your user ID:* `{user.id}`\n"
+        f"🔖 *Your username:* @{user.username or 'none'}\n"
+        f"💬 *This chat ID:* `{chat.id}`\n"
+        f"📝 *Chat type:* `{chat.type}`",
+        parse_mode="Markdown",
     )
 
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("myid", myid))
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+    try:
+        cursor.execute("SELECT COUNT(*) FROM registrations")
+        total = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM registrations "
+            "WHERE timestamp >= date('now', 'start of day')"
+        )
+        today = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT course, COUNT(*) AS n FROM registrations "
+            "GROUP BY course ORDER BY n DESC LIMIT 5"
+        )
+        top = cursor.fetchall()
+        lines = [
+            "📊 *FURTU TRAINING — Stats*\n",
+            f"Total registrations: *{total}*",
+            f"Today:               *{today}*\n",
+            "*Top courses:*",
+        ]
+        for i, (c, n) in enumerate(top, 1):
+            lines.append(f"  {i}. {c} — {n}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as exc:
+        logger.exception("Admin query failed: %s", exc)
+        await update.message.reply_text("❌ Could not retrieve stats.")
+
+
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(
+        ONLY_BUTTON_MSG.get(lang, ONLY_BUTTON_MSG["en"])
+        + "\n\nType /start to begin registration."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════
+def main():
+    # PicklePersistence saves conversation state to disk.
+    # If the server crashes and restarts, each user resumes from where they left off.
+    persistence = PicklePersistence(filepath="bot_persistence.pkl")
+
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .persistence(persistence)
+        .build()
+    )
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        allow_reentry=True,
+        persistent=True,           # survives restarts
+        name="registration_conv",  # required when persistent=True
+        states={
+            LANG:       [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
+            NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+            PHONE:      [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
+            COURSE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
+            CLASS_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, class_type)],
+            TIME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, time_step)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start",  start),
+        ],
+    )
+
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("myid",  myid))
+    app.add_handler(CommandHandler("admin", admin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
 
+    logger.info("✅ Furtu Training Bot is running…")
     app.run_polling(drop_pending_updates=False)
-
 
 
 if __name__ == "__main__":
