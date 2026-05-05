@@ -16,8 +16,9 @@ Features:
   • /myid and /admin utilities
   • Crash-safe channel posting
 """
-import os
+
 import logging
+import os
 import sqlite3
 from datetime import datetime
 
@@ -38,11 +39,13 @@ from telegram.ext import (
 )
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIG  — only edit these values
+#  CONFIG  — loaded from environment variables
 # ═══════════════════════════════════════════════════════════════
-TOKEN      = os.getenv("BOT_TOKEN")
-CHANNEL_ID = -1003518003389   # Set to None to disable channel posting
-ADMIN_IDS  = set()            # e.g. {123456789} — leave empty to allow all
+TOKEN      = os.environ["BOT_TOKEN"]                        # Required — set in Railway dashboard
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0")) or None  # Optional — set to your channel ID
+ADMIN_IDS  = set(
+    int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()
+)  # Optional — comma-separated user IDs, e.g. "123456,789012"
 
 COURSE_PRICE = "5,000 ETB"
 
@@ -80,7 +83,8 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 #  DATABASE
 # ═══════════════════════════════════════════════════════════════
-conn   = sqlite3.connect("registrations.db", check_same_thread=False)
+DB_PATH = os.environ.get("DB_PATH", "registrations.db")
+conn   = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS registrations (
@@ -150,8 +154,8 @@ MESSAGES = {
         "invalid_phone":     "⚠️ Digits only please, or use the Share button below:",
         "choose_course": (
             "📚 *Select the course you want to register for:*\n\n"
-            f"💰 *Course Fee: {COURSE_PRICE}* per course*\n\n"
-            "⏰ *The course Will Take 45 days*\n\n"
+            f"💰 *Course Fee: {COURSE_PRICE} per course*\n\n"
+            "⏰ *The course will take 45 days*\n\n"
         ),
         "choose_class":  "🏫 Choose your preferred *class schedule*:",
         "choose_time":   "⏰ Choose your preferred *class time*:",
@@ -172,7 +176,7 @@ MESSAGES = {
         "choose_course": (
             "📚 *መመዝገብ የሚፈልጉትን ኮርስ ይምረጡ:*\n\n"
             f"💰 *የ አንዱ የስልጠና ዋጋ: {COURSE_PRICE} ነው*\n\n"
-            "⏰*መደበኛ የቆይታ ጊዜ:45 ቀን"
+            "⏰ *መደበኛ የቆይታ ጊዜ: 45 ቀን*\n\n"
         ),
         "choose_class":  "🏫 *የክፍል ዓይነት* ይምረጡ:",
         "choose_time":   "⏰ *ጊዜ* ይምረጡ:",
@@ -192,8 +196,8 @@ MESSAGES = {
         "invalid_phone":     "⚠️ Lakkoofsa qofa galchi yookaan 'Eergii' tuqi:",
         "choose_course": (
             "📚 *Leenjii galma'uu barbaaddu filadhu:*\n\n"
-            f"💰 *Gatii Leenjii: {COURSE_PRICE}* leenjii tokkoof*\n\n"
-            "⏰ *Leenjiin Guyyaa 45niif Kennama*"
+            f"💰 *Gatii Leenjii: {COURSE_PRICE} leenjii tokkoof*\n\n"
+            "⏰ *Leenjiin Guyyaa 45niif Kennama*\n\n"
         ),
         "choose_class":  "🏫 *Gosa kutaa* filadhu:",
         "choose_time":   "⏰ *Yeroo* filadhu:",
@@ -263,7 +267,6 @@ def get_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
 def build_channel_summary(data: dict, timestamp: str) -> str:
     uname = f"@{data['username']}" if data.get("username") else "—"
     return (
-    
         "📋  *NEW REGISTRATION — FURTU TRAINING*\n"
         f"👤  *Name:* {data['name']}\n"
         f"📞  *Phone:* {data['phone']}\n"
@@ -276,15 +279,13 @@ def build_channel_summary(data: dict, timestamp: str) -> str:
 
 
 def build_user_summary(data: dict, timestamp: str) -> str:
-    uname = f"@{data['username']}" if data.get("username") else "—"
     return (
         "📋  *Registration Summary*\n"
         f"👤  *Name:* {data['name']}\n"
         f"📞  *Phone:* {data['phone']}\n"
         f"📚  *Course:* {data['course']}\n"
         f"🏫  *Schedule:* {data['class_type']}\n"
-        f"📍  *Location:*"
-        f"{FIXED_LOCATION_LINE}\n"
+        f"📍  *Location:* {FIXED_LOCATION_LINE}\n"
     )
 
 
@@ -312,7 +313,6 @@ async def language(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lang = LANGUAGE_MAP[text]
     context.user_data["language"] = lang
-    # Capture Telegram username now
     context.user_data["username"] = update.effective_user.username or ""
 
     await update.message.reply_text(
@@ -323,43 +323,49 @@ async def language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return NAME
 
 
+async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang      = get_lang(context)
+    name_text = update.message.text.strip()
+
+    if len(name_text) < 2:
+        await update.message.reply_text(
+            MESSAGES[lang]["invalid_name"], parse_mode="Markdown"
+        )
+        return NAME
+
+    context.user_data["name"] = name_text
+    phone_btn = KeyboardButton(MESSAGES[lang]["phone_share_label"], request_contact=True)
+    await update.message.reply_text(
+        MESSAGES[lang]["ask_phone"],
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([[phone_btn]], resize_keyboard=True),
+    )
+    return PHONE
+
+
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
 
-    # ✅ Accept ANY contact (fixes your issue)
     if update.message.contact:
         context.user_data["phone"] = update.message.contact.phone_number
-
     else:
-        text = update.message.text.strip()
-        digits = text.replace("+", "")
-
+        text   = update.message.text.strip()
+        digits = text.lstrip("+")
         if not digits.isdigit() or len(digits) < 7:
-            phone_btn = KeyboardButton(
-                MESSAGES[lang]["phone_share_label"], request_contact=True
-            )
+            phone_btn = KeyboardButton(MESSAGES[lang]["phone_share_label"], request_contact=True)
             await update.message.reply_text(
                 MESSAGES[lang]["invalid_phone"],
                 parse_mode="Markdown",
                 reply_markup=ReplyKeyboardMarkup([[phone_btn]], resize_keyboard=True),
             )
             return PHONE
-
         context.user_data["phone"] = text
 
-    # ✅ Remove keyboard FIRST
-    await update.message.reply_text(
-        "✅ Phone received!",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-    # ✅ Force next step cleanly
     await update.message.reply_text(
         MESSAGES[lang]["choose_course"],
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(COURSE_KB[lang], resize_keyboard=True),
     )
-
     return COURSE
 
 
@@ -460,7 +466,7 @@ async def time_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + SOCIAL_FOOTER,
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(
-            [[" /start "]], resize_keyboard=True
+            [["/start"]], resize_keyboard=True
         ),
     )
     return ConversationHandler.END
@@ -546,17 +552,19 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         allow_reentry=True,
+        persistent=True,
+        name="registration_conv",
         states={
-            LANG: [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND,ask_name)],
-            PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
-            COURSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
+            LANG:       [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
+            NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
+            PHONE:      [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
+            COURSE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
             CLASS_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, class_type)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time_step)],
+            TIME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, time_step)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CommandHandler("start", start),
+            CommandHandler("start",  start),
         ],
     )
 
