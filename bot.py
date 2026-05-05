@@ -548,7 +548,7 @@ def main():
         allow_reentry=True,
         states={
             LANG: [MessageHandler(filters.TEXT & ~filters.COMMAND, language)],
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND,ask_name)],
             PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), phone)],
             COURSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, course)],
             CLASS_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, class_type)],
